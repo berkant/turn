@@ -4,7 +4,9 @@
 package client
 
 import (
+	"maps"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +61,11 @@ func (b *binding) refreshedAt() time.Time {
 	defer b.mutex.RUnlock()
 
 	return b._refreshedAt
+}
+
+func (b *binding) ok() bool {
+	state := b.state()
+	return state == bindingStateReady || state == bindingStateRefresh
 }
 
 // Thread-safe binding map.
@@ -158,4 +165,11 @@ func (mgr *bindingManager) size() int {
 	defer mgr.mutex.RUnlock()
 
 	return len(mgr.chanMap)
+}
+
+func (mgr *bindingManager) all() []*binding {
+	mgr.mutex.RLock()
+	defer mgr.mutex.RUnlock()
+
+	return slices.Collect(maps.Values(mgr.chanMap))
 }
