@@ -4,9 +4,7 @@
 package client
 
 import (
-	"maps"
 	"net"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,6 +63,7 @@ func (b *binding) refreshedAt() time.Time {
 
 func (b *binding) ok() bool {
 	state := b.state()
+
 	return state == bindingStateReady || state == bindingStateRefresh
 }
 
@@ -171,5 +170,10 @@ func (mgr *bindingManager) all() []*binding {
 	mgr.mutex.RLock()
 	defer mgr.mutex.RUnlock()
 
-	return slices.Collect(maps.Values(mgr.chanMap))
+	list := make([]*binding, 0, len(mgr.chanMap))
+	for _, b := range mgr.chanMap {
+		list = append(list, b)
+	}
+
+	return list
 }

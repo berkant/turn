@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	maxReadQueueSize     = 1024
-	permRefreshInterval  = 120 * time.Second
-	bindingCheckInterval = 30 * time.Second
-	maxRetryAttempts     = 3
+	maxReadQueueSize       = 1024
+	permRefreshInterval    = 120 * time.Second
+	bindingRefreshInterval = 5 * time.Minute
+	bindingCheckInterval   = 30 * time.Second
+	maxRetryAttempts       = 3
 )
 
 const (
@@ -399,6 +400,7 @@ func (c *UDPConn) maybeBind(bound *binding) {
 		if err != nil {
 			c.log.Warnf("Failed to bind channel %d: %s", bound.number, err)
 			bound.setState(bindingStateFailed)
+
 			return
 		}
 		bound.setRefreshedAt(time.Now())
@@ -414,7 +416,7 @@ func (c *UDPConn) maybeBind(bound *binding) {
 	switch {
 	case state == bindingStateIdle:
 		bound.setState(bindingStateRequest)
-	case state == bindingStateReady && time.Since(bound.refreshedAt()) > 5*time.Minute:
+	case state == bindingStateReady && time.Since(bound.refreshedAt()) > bindingRefreshInterval:
 		bound.setState(bindingStateRefresh)
 	default:
 		return
@@ -446,6 +448,7 @@ func (c *UDPConn) bind(bound *binding) error {
 	trRes, err := c.client.PerformTransaction(msg, c.serverAddr, false)
 	if err != nil {
 		c.bindingMgr.deleteByAddr(bound.addr)
+
 		return err
 	}
 
@@ -455,6 +458,7 @@ func (c *UDPConn) bind(bound *binding) error {
 		if err = code.GetFrom(res); err == nil {
 			if code.Code == stun.CodeStaleNonce {
 				c.setNonceFromMsg(res)
+
 				return errTryAgain
 			}
 		}
