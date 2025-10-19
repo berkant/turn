@@ -85,7 +85,7 @@ func NewUDPConn(config *AllocationConfig) *UDPConn {
 		timerIDCheckBindings,
 		func(timerID int) {
 			for _, bound := range conn.bindingMgr.all() {
-				go conn.maybeBind(bound)
+				conn.maybeBind(bound)
 			}
 		},
 		bindingCheckInterval,
