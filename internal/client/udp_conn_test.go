@@ -14,18 +14,6 @@ import (
 )
 
 func TestUDPConn(t *testing.T) {
-	staleTime := func() time.Time {
-		return time.Now().Add(-(bindingRefreshInterval + 1*time.Minute))
-	}
-
-	staleNonceMsg := func() *stun.Message {
-		return stun.MustBuild(
-			stun.NewType(stun.MethodChannelBind, stun.ClassErrorResponse),
-			stun.CodeStaleNonce,
-			stun.NewNonce("new-nonce-123"),
-		)
-	}
-
 	makeConn := func(client *mockClient, bm *bindingManager) UDPConn {
 		return UDPConn{
 			allocation: allocation{
@@ -36,77 +24,68 @@ func TestUDPConn(t *testing.T) {
 		}
 	}
 
-	t.Run("maybeBind()", func(t *testing.T) {
-		makeClient := func(shouldSucceed bool) *mockClient {
-			return &mockClient{
-				performTransaction: func(msg *stun.Message, addr net.Addr, dontWait bool) (TransactionResult, error) {
-					if shouldSucceed {
-						return TransactionResult{Msg: new(stun.Message)}, nil
-					}
+	staleNonceMsg := func() *stun.Message {
+		return stun.MustBuild(
+			stun.NewType(stun.MethodChannelBind, stun.ClassErrorResponse),
+			stun.CodeStaleNonce,
+			stun.NewNonce("new-nonce-123"),
+		)
+	}
 
-					return TransactionResult{Msg: staleNonceMsg()}, nil
-				},
-			}
+	t.Run("maybeBind()", func(t *testing.T) {
+		tests := []struct {
+			name          string
+			initialState  bindingState
+			interimState  bindingState
+			finalState    bindingState
+			pastInterval  bool
+			shouldSucceed bool
+		}{
+			{"idle -> request -> ready", bindingStateIdle, bindingStateRequest, bindingStateReady, false, true},
+			{"idle -> request -> failed", bindingStateIdle, bindingStateRequest, bindingStateFailed, false, false},
+			{"ready (stale) -> refresh -> ready", bindingStateReady, bindingStateRefresh, bindingStateReady, true, true},
+			{"ready (stale) -> refresh -> failed", bindingStateReady, bindingStateRefresh, bindingStateFailed, true, false},
+
+			// Noop cases:
+			{"ready (noop)", bindingStateReady, bindingStateReady, bindingStateReady, false, true},
+			{"request (noop)", bindingStateRequest, bindingStateRequest, bindingStateRequest, false, true},
+			{"refresh (noop)", bindingStateRefresh, bindingStateRefresh, bindingStateRefresh, false, true},
+			{"failed (noop)", bindingStateFailed, bindingStateFailed, bindingStateFailed, false, true},
 		}
 
-		t.Run("state transitions", func(t *testing.T) {
-			bm := newBindingManager()
-			bound := bm.create(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234})
-			conn := makeConn(makeClient(true), bm)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				unblock := make(chan struct{})
 
-			t.Run("idle to request", func(t *testing.T) {
-				bound.setState(bindingStateIdle)
+				bm := newBindingManager()
+				bound := bm.create(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234})
+				conn := makeConn(&mockClient{
+					performTransaction: func(msg *stun.Message, addr net.Addr, dontWait bool) (TransactionResult, error) {
+						<-unblock
+						if tt.shouldSucceed {
+							return TransactionResult{Msg: new(stun.Message)}, nil
+						}
+
+						return TransactionResult{Msg: staleNonceMsg()}, nil
+					},
+				}, bm)
+
+				bound.setState(tt.initialState)
+				if tt.pastInterval {
+					bound.setRefreshedAt(time.Now().Add(-(bindingRefreshInterval + 1*time.Minute)))
+				}
+
 				conn.maybeBind(bound)
-				assert.Equal(t, bindingStateRequest, bound.state(), "should be request")
+				assert.Equal(t, tt.interimState, bound.state())
+
+				// Release barrier so inner bind() can move forward.
+				close(unblock)
+
+				assert.Eventually(t, func() bool {
+					return bound.state() == tt.finalState
+				}, 5*time.Second, 10*time.Millisecond)
 			})
-
-			t.Run("ready to refresh (past interval)", func(t *testing.T) {
-				bound.setState(bindingStateReady)
-				bound.setRefreshedAt(staleTime())
-				conn.maybeBind(bound)
-				assert.Equal(t, bindingStateRefresh, bound.state(), "should be refresh")
-			})
-
-			t.Run("ready to ready (not past interval)", func(t *testing.T) {
-				bound.setState(bindingStateReady)
-				bound.setRefreshedAt(time.Now())
-				conn.maybeBind(bound)
-				assert.Equal(t, bindingStateReady, bound.state(), "should remain ready")
-			})
-		})
-
-		t.Run("outcomes", func(t *testing.T) {
-			tests := []struct {
-				name          string
-				initialState  bindingState
-				pastInterval  bool
-				shouldSucceed bool
-				expectState   bindingState
-			}{
-				{"idle bind success", bindingStateIdle, false, true, bindingStateReady},
-				{"idle bind fail", bindingStateIdle, false, false, bindingStateFailed},
-				{"refresh success", bindingStateReady, true, true, bindingStateReady},
-				{"refresh fail", bindingStateReady, true, false, bindingStateFailed},
-			}
-
-			for _, tt := range tests {
-				t.Run(tt.name, func(t *testing.T) {
-					bm := newBindingManager()
-					bound := bm.create(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234})
-					conn := makeConn(makeClient(tt.shouldSucceed), bm)
-
-					bound.setState(tt.initialState)
-					if tt.pastInterval {
-						bound.setRefreshedAt(staleTime())
-					}
-
-					conn.maybeBind(bound)
-					assert.Eventually(t, func() bool {
-						return bound.state() == tt.expectState
-					}, 5*time.Second, 10*time.Millisecond)
-				})
-			}
-		})
+		}
 	})
 
 	t.Run("bind()", func(t *testing.T) {
@@ -124,16 +103,14 @@ func TestUDPConn(t *testing.T) {
 				},
 				expectErr:            errFake,
 				expectBindingDeleted: true,
-				expectNonceChanged:   false,
 			},
 			{
 				name: "ErrorResponse with CodeStaleNonce triggers nonce update",
 				transactionFn: func(*stun.Message, net.Addr, bool) (TransactionResult, error) {
 					return TransactionResult{Msg: staleNonceMsg()}, nil
 				},
-				expectErr:            errTryAgain,
-				expectBindingDeleted: false,
-				expectNonceChanged:   true,
+				expectErr:          errTryAgain,
+				expectNonceChanged: true,
 			},
 		}
 
